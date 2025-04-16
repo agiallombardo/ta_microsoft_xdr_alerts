@@ -1,0 +1,430 @@
+{
+    "pages": {
+        "configuration": {
+            "title": "Configuration",
+            "description": "Set up your add-on",
+            "tabs": [
+                {
+                    "name": "account",
+                    "title": "Accounts",
+                    "table": {
+                        "header": [
+                            {
+                                "field": "name",
+                                "label": "Name"
+                            },
+                            {
+                                "field": "username",
+                                "label": "Username"
+                            }
+                        ],
+                        "actions": [
+                            "edit",
+                            "delete",
+                            "clone"
+                        ]
+                    },
+                    "entity": [
+                        {
+                            "field": "name",
+                            "label": "Name",
+                            "type": "text",
+                            "required": true,
+                            "help": "A unique name for the account.",
+                            "validators": [
+                                {
+                                    "type": "regex",
+                                    "pattern": "^[a-zA-Z]\\w*$",
+                                    "errorMsg": "Account Name must begin with a letter and consist exclusively of alphanumeric characters and underscores."
+                                },
+                                {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 100,
+                                    "errorMsg": "Length of input name should be between 1 and 100"
+                                }
+                            ]
+                        },
+                        {
+                            "field": "username",
+                            "label": "Username",
+                            "type": "text",
+                            "required": true,
+                            "help": "Enter the username for this account.",
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 200,
+                                    "errorMsg": "Length of username should be between 1 and 200"
+                                }
+                            ]
+                        },
+                        {
+                            "field": "password",
+                            "label": "Password",
+                            "type": "text",
+                            "encrypted": true,
+                            "required": true,
+                            "help": "Enter the password for this account.",
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 8192,
+                                    "errorMsg": "Length of password should be between 1 and 8192"
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "name": "proxy",
+                    "title": "Proxy",
+                    "entity": [
+                        {
+                            "field": "proxy_enabled",
+                            "label": "Enable",
+                            "type": "checkbox"
+                        },
+                        {
+                            "field": "proxy_type",
+                            "label": "Proxy Type",
+                            "type": "singleSelect",
+                            "options": {
+                                "disableSearch": true,
+                                "autoCompleteFields": [
+                                    {
+                                        "label": "http",
+                                        "value": "http"
+                                    },
+                                    {
+                                        "label": "socks4",
+                                        "value": "socks4"
+                                    },
+                                    {
+                                        "label": "socks5",
+                                        "value": "socks5"
+                                    }
+                                ]
+                            },
+                            "defaultValue": "http"
+                        },
+                        {
+                            "field": "proxy_url",
+                            "label": "Host",
+                            "type": "text",
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "minLength": 0,
+                                    "maxLength": 4096,
+                                    "errorMsg": "Max host length is 4096"
+                                }
+                            ]
+                        },
+                        {
+                            "field": "proxy_port",
+                            "label": "Port",
+                            "type": "text",
+                            "validators": [
+                                {
+                                    "type": "number",
+                                    "range": [
+                                        1,
+                                        65535
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            "field": "proxy_username",
+                            "label": "Username",
+                            "type": "text",
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "minLength": 0,
+                                    "maxLength": 50,
+                                    "errorMsg": "Max length of username is 50"
+                                }
+                            ]
+                        },
+                        {
+                            "field": "proxy_password",
+                            "label": "Password",
+                            "type": "text",
+                            "encrypted": true,
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "minLength": 0,
+                                    "maxLength": 8192,
+                                    "errorMsg": "Max length of password is 8192"
+                                }
+                            ]
+                        },
+                        {
+                            "field": "proxy_rdns",
+                            "label": "Remote DNS resolution",
+                            "type": "checkbox"
+                        }
+                    ],
+                    "options": {
+                        "saveValidator": "function(formData) { if(!formData.proxy_enabled || formData.proxy_enabled === '0') {return true; } if(!formData.proxy_url) { return 'Proxy Host can not be empty'; } if(!formData.proxy_port) { return 'Proxy Port can not be empty'; } return true; }"
+                    }
+                },
+                {
+                    "name": "logging",
+                    "title": "Logging",
+                    "entity": [
+                        {
+                            "type": "singleSelect",
+                            "label": "Log level",
+                            "options": {
+                                "disableSearch": true,
+                                "autoCompleteFields": [
+                                    {
+                                        "value": "DEBUG",
+                                        "label": "DEBUG"
+                                    },
+                                    {
+                                        "value": "INFO",
+                                        "label": "INFO"
+                                    },
+                                    {
+                                        "value": "WARNING",
+                                        "label": "WARNING"
+                                    },
+                                    {
+                                        "value": "ERROR",
+                                        "label": "ERROR"
+                                    },
+                                    {
+                                        "value": "CRITICAL",
+                                        "label": "CRITICAL"
+                                    }
+                                ]
+                            },
+                            "defaultValue": "INFO",
+                            "field": "loglevel",
+                            "required": true,
+                            "validators": [
+                                {
+                                    "type": "regex",
+                                    "errorMsg": "Log level must be one of: DEBUG, INFO, WARNING, ERROR, CRITICAL",
+                                    "pattern": "^DEBUG|INFO|WARNING|ERROR|CRITICAL$"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        },
+        "inputs": {
+            "title": "Inputs",
+            "description": "Manage your data inputs",
+            "table": {
+                "header": [
+                    {
+                        "field": "name",
+                        "label": "Name"
+                    },
+                    {
+                        "field": "interval",
+                        "label": "Interval"
+                    },
+                    {
+                        "field": "index",
+                        "label": "Index"
+                    },
+                    {
+                        "field": "disabled",
+                        "label": "Status"
+                    }
+                ],
+                "moreInfo": [
+                    {
+                        "field": "name",
+                        "label": "Name"
+                    },
+                    {
+                        "field": "interval",
+                        "label": "Interval"
+                    },
+                    {
+                        "field": "index",
+                        "label": "Index"
+                    },
+                    {
+                        "field": "disabled",
+                        "label": "Status",
+                        "mapping": {
+                            "true": "Inactive",
+                            "false": "Active"
+                        }
+                    },
+                    {
+                        "field": "tenant",
+                        "label": "Azure AD Tenant ID"
+                    },
+                    {
+                        "field": "filter",
+                        "label": "OData Filter"
+                    },
+                    {
+                        "field": "app_account",
+                        "label": "App Account"
+                    }
+                ],
+                "actions": [
+                    "edit",
+                    "delete",
+                    "clone"
+                ]
+            },
+            "services": [
+                {
+                    "name": "microsoft_graph_security",
+                    "title": "Microsoft Graph Security",
+                    "entity": [
+                        {
+                            "field": "name",
+                            "label": "Name",
+                            "type": "text",
+                            "help": "A unique name for the data input.",
+                            "required": true,
+                            "validators": [
+                                {
+                                    "type": "regex",
+                                    "pattern": "^[a-zA-Z]\\w*$",
+                                    "errorMsg": "Input Name must begin with a letter and consist exclusively of alphanumeric characters and underscores."
+                                },
+                                {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 100,
+                                    "errorMsg": "Length of input name should be between 1 and 100"
+                                }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "field": "interval",
+                            "label": "Interval",
+                            "validators": [
+                                {
+                                    "type": "regex",
+                                    "errorMsg": "Interval must be either a non-negative number, CRON interval or -1.",
+                                    "pattern": "^((?:-1|\\d+(?:\\.\\d+)?)|(([\\*\\d{1,2}\\,\\-\\/]+\\s){4}[\\*\\d{1,2}\\,\\-\\/]+))$"
+                                },
+                                {
+                                    "type": "number",
+                                    "range": [
+                                        10,
+                                        301
+                                    ],
+                                    "errorMsg": "Interval must be between 10 and 301"
+                                }
+                            ],
+                            "help": "Time interval of the data input, in seconds.",
+                            "required": true,
+                            "defaultValue": "300"
+                        },
+                        {
+                            "type": "singleSelect",
+                            "field": "index",
+                            "label": "Index",
+                            "defaultValue": "default",
+                            "options": {
+                                "endpointUrl": "data/indexes?search=isInternal=0+disabled=0",
+                                "denyList": "^_.*$",
+                                "createSearchChoice": true
+                            },
+                            "validators": [
+                                {
+                                    "type": "regex",
+                                    "errorMsg": "Index names must begin with a letter or a number and must contain only letters, numbers, underscores or hyphens.",
+                                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9\\\\_\\\\-]*$"
+                                },
+                                {
+                                    "type": "string",
+                                    "errorMsg": "Length of index name should be between 1 and 80.",
+                                    "minLength": 1,
+                                    "maxLength": 80
+                                }
+                            ]
+                        },
+                        {
+                            "field": "tenant",
+                            "label": "Azure AD Tenant ID",
+                            "help": "",
+                            "required": true,
+                            "type": "text",
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "minLength": 0,
+                                    "maxLength": 8192,
+                                    "errorMsg": "Max length of text input is 8192"
+                                }
+                            ]
+                        },
+                        {
+                            "field": "filter",
+                            "label": "OData Filter",
+                            "help": "",
+                            "required": false,
+                            "type": "text",
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "minLength": 0,
+                                    "maxLength": 8192,
+                                    "errorMsg": "Max length of text input is 8192"
+                                }
+                            ]
+                        },
+                        {
+                            "field": "app_account",
+                            "label": "Account to use",
+                            "help": "Account to use for this input.",
+                            "required": true,
+                            "type": "singleSelect",
+                            "options": {
+                                "referenceName": "account"
+                            },
+                            "validators": [
+                                {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 100,
+                                    "errorMsg": "Length of account name should be between 1 and 100"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        },
+        "dashboard": {
+            "panels": [
+                {
+                    "name": "default"
+                }
+            ]
+        }
+    },
+    "meta": {
+        "name": "ta_microsoft_xdr_alerts",
+        "restRoot": "ta_microsoft_xdr_alerts",
+        "version": "0.0.1",
+        "displayName": "Defender XDR Alerts",
+        "schemaVersion": "0.0.9",
+        "supportedThemes": [
+            "light",
+            "dark"
+        ],
+        "_uccVersion": "5.59.0"
+    }
+}

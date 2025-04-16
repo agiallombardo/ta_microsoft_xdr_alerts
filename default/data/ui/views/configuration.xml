@@ -1,4 +1,0 @@
-<?xml version="1.0" ?>
-<view template="ta_microsoft_xdr_alerts:/templates/base.html" type="html" isDashboard="False">
-    <label>Configuration</label>
-</view>
