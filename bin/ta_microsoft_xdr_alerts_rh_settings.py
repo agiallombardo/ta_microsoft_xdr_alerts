@@ -93,13 +93,37 @@ fields_logging = [
 ]
 model_logging = RestModel(fields_logging, name='logging')
 
+def proxy_validation(name, data):
+    """Validate proxy settings on save"""
+    if data.get('proxy_enabled') in (True, '1'):
+        proxy_url = data.get('proxy_url')
+        proxy_port = data.get('proxy_port')
+        
+        if not proxy_url or not proxy_url.strip():
+            return 'Proxy Host cannot be empty when proxy is enabled'
+            
+        if not proxy_port:
+            return 'Proxy Port cannot be empty when proxy is enabled'
+            
+        try:
+            port = int(proxy_port)
+            if port < 1 or port > 65535:
+                return 'Proxy Port must be between 1 and 65535'
+        except (ValueError, TypeError):
+            return 'Proxy Port must be a valid integer'
+    
+    return None
+
 
 endpoint = MultipleModel(
     'ta_microsoft_xdr_alerts_settings',
-    models=[
-        model_proxy, 
+   models=[
+        model_proxy,
         model_logging
     ],
+    validators={
+        'proxy': proxy_validation
+    },
     need_reload=False,
 )
 

@@ -104,10 +104,28 @@ fields = [
 model = RestModel(fields, name=None, special_fields=special_fields)
 
 
+def validate_input(name, entity):
+    """Custom validation for Microsoft Graph Security inputs"""
+    # Validate interval
+    interval = entity.get('interval')
+    try:
+        interval_in_seconds = int(interval)
+        if interval_in_seconds < 300:
+            return "field 'Interval' should be at least 300"
+    except (ValueError, TypeError):
+        return "field 'Interval' must be a valid integer"
+    
+    # Validate filter if provided
+    filter_arg = entity.get('filter')
+    if filter_arg and 'lastModifiedDateTime' in filter_arg:
+        return "'lastModifiedDateTime' is a reserved property and cannot be part of the filter"
+    
+    # All validation passed
+    return None
 
 endpoint = DataInputModel(
     'microsoft_graph_security',
-    model,
+    model, validator=validate_input,
 )
 
 
