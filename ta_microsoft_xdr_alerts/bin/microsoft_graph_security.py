@@ -264,7 +264,7 @@ class MICROSOFT_GRAPH_SECURITY(smi.Script):
                 data=json.dumps(alert),
                 source=helper.get_arg('name'),
                 index=helper.get_arg('index', 'default'),
-                sourcetype='GraphSecurityAlert:v2',
+                sourcetype='GraphSecurityAlert:V2',
             )
             ew.write_event(event)
 
