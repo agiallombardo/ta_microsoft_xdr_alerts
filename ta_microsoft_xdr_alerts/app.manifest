@@ -6,7 +6,7 @@
             {
                 "company": null,
                 "email": null,
-                "name": ""
+                "name": "Anthony Giallombardo"
             }
         ],
         "classification": {
@@ -21,7 +21,7 @@
         "id": {
             "group": null,
             "name": "ta_microsoft_xdr_alerts",
-            "version": "0.0.1"
+            "version": "0.0.5"
         },
         "license": {
             "name": "LICENSE.txt",
@@ -50,8 +50,7 @@
         "_search_head_clustering"
     ],
     "targetWorkloads": [
-        "_search_heads",
-        "_indexers"
+        "_search_heads"
     ],
     "tasks": null
 }
