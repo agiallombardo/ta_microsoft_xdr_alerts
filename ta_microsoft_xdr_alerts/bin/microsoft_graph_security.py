@@ -6,25 +6,36 @@ import os
 import datetime
 import urllib
 import traceback
-
-from splunklib import modularinput as smi
+import time
+from solnlib import conf_manager
 from splunklib import client
-
+from splunklib import modularinput as smi
 
 GRAPH_ALERTS_URL = 'https://graph.microsoft.com/v1.0/security/alerts_v2'
 ACCESS_TOKEN = 'access_token'
 CLIENT_ID = 'client_id'
 CLIENT_SECRET = 'client_secret'
 TENANT = 'tenant'
-LOG_DIRECTORY_NAME = 'logs'
 TIME_FORMAT = '%Y-%m-%dT%H:%M:%S.000Z'
+REQTIMEOUT = 30
+APP_NAME = __file__.split(os.path.sep)[-3]
+ACCOUNT_CONFIG_FILE = "ta_microsoft_xdr_alerts_account"
+SETTINGS_CONFIG_FILE = "ta_microsoft_xdr_alerts_settings"
 
 
 class MICROSOFT_GRAPH_SECURITY(smi.Script):
     def __init__(self):
         super(MICROSOFT_GRAPH_SECURITY, self).__init__()
-        self.session_key = None
-        self.app_name = "ta_microsoft_xdr_alerts"
+        self._session_key = None
+        self._logfile_prefix = "microsoft_graph_security_input"
+        self.logger = None
+        self._checkpoint_data = {}
+        self._source = "MicrosoftGraphSecurity"
+        self._sourcetype = "GraphSecurityAlert:V2"
+        self._index = None
+        self._global_account = None
+        self._input_name = None
+        self._eventhost = None
         
     def get_scheme(self):
         scheme = smi.Scheme('microsoft_graph_security')
@@ -78,199 +89,398 @@ class MICROSOFT_GRAPH_SECURITY(smi.Script):
         if filter_arg is not None and 'lastModifiedDateTime' in filter_arg:
             raise ValueError("'lastModifiedDateTime' is a reserved property and cannot be part of the filter")
 
+    def _set_logger(self, session_key, input_name):
+        """Set Logger Instance"""
+        try:
+            from solnlib import log
+            logger = log.Logs().get_logger(f"{self._logfile_prefix}-{input_name}")
+            log_level = conf_manager.get_log_level(
+                logger=logger,
+                session_key=session_key,
+                app_name=APP_NAME,
+                conf_name=SETTINGS_CONFIG_FILE,
+                default_log_level="INFO",
+            )
+            logger.setLevel(log_level)
+            logger.info(f"log level set is: {log_level}")
+            return logger
+        except Exception as e:
+            print(f"Failed to initialize logger: {str(e)}", file=sys.stderr)
+            sys.exit(1)
+
     def stream_events(self, inputs: smi.InputDefinition, ew: smi.EventWriter):
-        # Get session key for later use
-        self.session_key = self._input_definition.metadata['session_key']
+        self._session_key = self._input_definition.metadata['session_key']
         
+        # Get input parameters
         for input_name, input_item in inputs.inputs.items():
             try:
-                # Set up helper object for compatibility
-                helper = InputHelper(input_item, input_name, self.session_key, self.app_name)
+                self._input_name = input_name
+                self._index = input_item.get('index', 'default')
+                self._global_account = input_item.get('app_account')
+                tenant = input_item.get('tenant')
+                filter_arg = input_item.get('filter')
                 
-                # Collect events using the helper
-                self.collect_events(helper, ew)
+                # Set up logger
+                self.logger = self._set_logger(self._session_key, self._input_name)
+                self.logger.info(f"Starting data collection for input: {self._input_name}")
                 
-            except Exception as e:
-                ew.log("ERROR", f"Error processing input '{input_name}': {str(e)}")
-                ew.log("ERROR", traceback.format_exc())
-    
-    def collect_events(self, helper, ew):
-        """Main function to collect events from Microsoft Graph Security API"""
-        try:
-            helper.log_debug("Starting event collection")
-            access_token = self._get_access_token(helper)
-            
-            headers = {
-                "Authorization": f"Bearer {access_token}",
-                "User-Agent": f"MicrosoftGraphSecurity-Splunk/{self._get_app_version(helper)}"
-            }
-            
-            interval_in_seconds = int(helper.get_arg('interval', 300))
-            input_name = helper.input_name
-            check_point_key = f"{input_name}_is_first_time_collecting_events"
-            
-            is_first_time_collecting_events = helper.get_check_point(check_point_key)
-            
-            if is_first_time_collecting_events is None or is_first_time_collecting_events != 'false':
-                helper.save_check_point(check_point_key, 'false')
-                filter_val = ''
-            else:
+                # Set host information
+                account_config = self._get_account_config(self._global_account)
+                self._eventhost = account_config.get('endpoint', account_config.get('domain', 'microsoft.graph'))
+                
+                # Calculate time window
+                interval_in_seconds = int(input_item.get('interval', 300))
                 now = datetime.datetime.utcnow()
                 interval_ago = now - datetime.timedelta(seconds=interval_in_seconds)
-                filter_val = f'lastModifiedDateTime gt {interval_ago.strftime(TIME_FORMAT)} and lastModifiedDateTime lt {now.strftime(TIME_FORMAT)}'
+                
+                # Create checkpoint key
+                checkpoint_key = f"{self._input_name}_last_run"
+                
+                # Get last run time from checkpoint or use interval ago
+                last_run_time = self._get_checkpoint(checkpoint_key)
+                if not last_run_time:
+                    self.logger.info("First time running, using interval time window")
+                    last_run_time = interval_ago.strftime(TIME_FORMAT)
+                
+                # Create filter based on time window
+                time_filter = f'lastModifiedDateTime gt {last_run_time} and lastModifiedDateTime lt {now.strftime(TIME_FORMAT)}'
+                
+                # Combine with user filter if provided
+                if filter_arg and filter_arg.strip() and filter_arg != 'null':
+                    combined_filter = f"{time_filter} and {filter_arg}"
+                else:
+                    combined_filter = time_filter
+                
+                # Collect events
+                self.logger.debug(f"Using filter: {combined_filter}")
+                self._collect_events(tenant, combined_filter, account_config, ew)
+                
+                # Update checkpoint
+                self._set_checkpoint(checkpoint_key, now.strftime(TIME_FORMAT))
+                
+                self.logger.info(f"Data collection completed for input: {self._input_name}")
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(f"Error processing input '{input_name}': {str(e)}")
+                    self.logger.error(traceback.format_exc())
+                else:
+                    print(f"ERROR: Error processing input '{input_name}': {str(e)}", file=sys.stderr)
+                    print(f"ERROR: {traceback.format_exc()}", file=sys.stderr)
 
-            filter_arg = helper.get_arg('filter')
-            if filter_arg and filter_arg.strip() and filter_arg != 'null':
-                if filter_val:
-                    filter_val += ' and '
-                filter_val += filter_arg
+    def _get_account_config(self, account_name):
+        """Get account configuration from splunk"""
+        try:
+            cfm = conf_manager.ConfManager(
+                self._session_key,
+                APP_NAME,
+                realm=f"__REST_CREDENTIAL__#{APP_NAME}#configs/conf-{ACCOUNT_CONFIG_FILE}",
+            )
             
-            params = {'$filter': filter_val} if filter_val else {}
+            account_config_file = cfm.get_conf(ACCOUNT_CONFIG_FILE)
+            account_config = account_config_file.get(account_name)
             
-            helper.log_debug(f"Using filter: {filter_val}")
-            
-            response = self._send_http_request(GRAPH_ALERTS_URL, "GET", headers=headers, parameters=params)
-            
-            self._process_response(helper, ew, response, headers)
-            
+            if not account_config:
+                msg = f"Account '{account_name}' not found in configuration"
+                if self.logger:
+                    self.logger.error(msg)
+                else:
+                    print(f"ERROR: {msg}", file=sys.stderr)
+                raise ValueError(msg)
+                
+            return account_config
         except Exception as e:
-            helper.log_error(f"Error collecting events: {str(e)}")
-            helper.log_error(traceback.format_exc())
+            msg = f"Error getting account configuration: {str(e)}"
+            if self.logger:
+                self.logger.error(msg)
+                self.logger.error(traceback.format_exc())
+            else:
+                print(f"ERROR: {msg}", file=sys.stderr)
+                print(f"ERROR: {traceback.format_exc()}", file=sys.stderr)
+            raise
 
-    def _get_access_token(self, helper):
+    def _get_proxy_settings(self):
+        """Get proxy settings from configuration"""
+        try:
+            settings_cfm = conf_manager.ConfManager(
+                self._session_key,
+                APP_NAME,
+                realm=f"__REST_CREDENTIAL__#{APP_NAME}#configs/conf-{SETTINGS_CONFIG_FILE}",
+            )
+            
+            settings_conf = settings_cfm.get_conf(SETTINGS_CONFIG_FILE).get_all()
+            
+            proxy_settings = {}
+            proxy_stanza = {}
+            for k, v in settings_conf.get("proxy", {}).items():
+                proxy_stanza[k] = v
+
+            if not proxy_stanza or int(proxy_stanza.get("proxy_enabled", 0)) == 0:
+                self.logger.info("Proxy is disabled. Returning None")
+                return proxy_settings
+                
+            proxy_type = proxy_stanza.get("proxy_type", "http")
+            proxy_port = proxy_stanza.get("proxy_port")
+            proxy_url = proxy_stanza.get("proxy_url")
+            proxy_username = proxy_stanza.get("proxy_username", "")
+            proxy_password = proxy_stanza.get("proxy_password", "")
+
+            if proxy_username and proxy_password:
+                from urllib import parse
+                proxy_username = parse.quote_plus(proxy_username)
+                proxy_password = parse.quote_plus(proxy_password)
+                proxy_uri = "{}://{}:{}@{}:{}".format(
+                    proxy_type, proxy_username, proxy_password, proxy_url, proxy_port
+                )
+            else:
+                proxy_uri = "{}://{}:{}".format(proxy_type, proxy_url, proxy_port)
+
+            proxy_settings = {"http": proxy_uri, "https": proxy_uri}
+            self.logger.info("Successfully fetched configured proxy details.")
+            return proxy_settings
+        except Exception as e:
+            self.logger.error(f"Failed to fetch proxy details: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return {}
+
+    def _get_access_token(self, tenant, account_config):
         """Get access token from Microsoft Graph API"""
-        account_name = helper.get_arg('app_account')
+        self.logger.debug("Getting access token")
+        auth_type = account_config.get("auth_type", "basic")
         
-        # Get account details using REST API
-        service = client.connect(
-            token=self.session_key,
-            app=self.app_name,
-            owner='nobody'
-        )
-        
-        account_collection = service.storage_passwords
-        for account in account_collection:
-            username = account.content.get('username')
-            if username and username.startswith(f"{account_name}:"):
-                client_id = account.content.get('username').split(':', 1)[1]
-                client_secret = account.content.get('clear_password')
-                break
+        if auth_type.lower() == "oauth":
+            # OAuth authentication
+            client_id = account_config.get("client_id")
+            client_secret = account_config.get("client_secret")
+            access_token = account_config.get("access_token")
+            refresh_token = account_config.get("refresh_token")
+            
+            # Check if token needs refresh
+            if not access_token:
+                self.logger.info("No access token found, attempting to refresh")
+                access_token = self._refresh_token(tenant, client_id, client_secret, refresh_token)
+            
+            return access_token
         else:
-            raise ValueError(f"Account '{account_name}' not found")
-        
-        tenant = helper.get_arg('tenant')
+            # Basic authentication (API key)
+            client_id = account_config.get("username")
+            client_secret = account_config.get("password")
+            
+            # Get token
+            _data = {
+                CLIENT_ID: client_id,
+                'scope': 'https://graph.microsoft.com/.default',
+                CLIENT_SECRET: client_secret,
+                'grant_type': 'client_credentials'
+            }
+            
+            _url = f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token'
+            
+            if sys.version_info > (3, 0):
+                import urllib.parse
+                payload = urllib.parse.urlencode(_data)
+            else:
+                import urllib
+                payload = urllib.urlencode(_data)
+            
+            headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+            proxies = self._get_proxy_settings()
+            
+            import requests
+            try:
+                response = requests.post(
+                    _url,
+                    headers=headers,
+                    data=payload,
+                    proxies=proxies,
+                    timeout=REQTIMEOUT
+                )
+                response.raise_for_status()
+                token_data = response.json()
+                return token_data.get(ACCESS_TOKEN)
+            except Exception as e:
+                self.logger.error(f"Error getting access token: {str(e)}")
+                self.logger.error(traceback.format_exc())
+                raise
 
-        _data = {
-            CLIENT_ID: client_id,
-            'scope': 'https://graph.microsoft.com/.default',
-            CLIENT_SECRET: client_secret,
-            'grant_type': 'client_credentials'
+    def _refresh_token(self, tenant, client_id, client_secret, refresh_token):
+        """Refresh OAuth token"""
+        import requests
+        import base64
+        
+        self.logger.info("Refreshing OAuth token")
+        
+        url = f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token'
+        payload = f'grant_type=refresh_token&refresh_token={refresh_token}'
+        auth_value = base64.urlsafe_b64encode(
+            f"{client_id}:{client_secret}".encode("utf-8").strip()
+        ).decode()
+        
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Basic {auth_value}",
+            "Content-Type": "application/x-www-form-urlencoded",
         }
         
-        _url = f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token'
+        proxies = self._get_proxy_settings()
         
-        if (sys.version_info > (3, 0)):
-            # Python 3
-            import urllib.parse
-            payload = urllib.parse.urlencode(_data)
-        else:
-            return
+        try:
+            response = requests.post(
+                url, 
+                headers=headers, 
+                data=payload, 
+                proxies=proxies, 
+                timeout=REQTIMEOUT
+            )
+            response.raise_for_status()
+            
+            content = response.json()
+            access_token = content.get("access_token")
+            new_refresh_token = content.get("refresh_token")
+            
+            # Update the tokens in the configuration
+            self._update_tokens(self._global_account, access_token, new_refresh_token, client_secret)
+            
+            return access_token
+        except Exception as e:
+            self.logger.error(f"Error refreshing token: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            raise
 
-    def _get_app_version(self, helper):
+    def _update_tokens(self, account_name, access_token, refresh_token, client_secret):
+        """Update access and refresh tokens in account configuration"""
+        try:
+            fields = {
+                "access_token": str(access_token),
+                "refresh_token": str(refresh_token),
+                "client_secret": str(client_secret),
+            }
+            
+            cfm = conf_manager.ConfManager(
+                self._session_key,
+                APP_NAME,
+                realm=f"__REST_CREDENTIAL__#{APP_NAME}#configs/conf-{ACCOUNT_CONFIG_FILE}",
+            )
+            conf = cfm.get_conf(ACCOUNT_CONFIG_FILE)
+            conf.update(account_name, fields, fields.keys())
+            
+            self.logger.info(f"Updated account '{account_name}' with new access and refresh tokens")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error updating tokens: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return False
+
+    def _get_app_version(self):
         """Get the app version from Splunk"""
         app_version = ""
         try:
             service = client.connect(
-                token=self.session_key,
-                app=self.app_name,
+                token=self._session_key,
+                app=APP_NAME,
                 owner='nobody'
             )
-            app_info = service.apps[self.app_name]
+            app_info = service.apps[APP_NAME]
             app_version = app_info.content.get('version', '')
         except Exception as e:
-            helper.log_error(f"Error getting app version: {str(e)}")
+            self.logger.error(f"Error getting app version: {str(e)}")
         
         return app_version
 
-    def _send_http_request(self, url, method, parameters=None, payload=None, headers=None):
-        """Send HTTP request and return response"""
-        import requests
-        
-        # Configure proxy if set in Splunk
-        proxies = None
-        # Logic to get proxy settings would go here
-        
-        if parameters:
-            from urllib.parse import urlencode
-            url = f"{url}?{urlencode(parameters)}"
-            
+    def _collect_events(self, tenant, filter_val, account_config, ew):
+        """Collect events from Microsoft Graph Security API"""
         try:
-            response = requests.request(
-                method,
-                url,
-                data=payload,
-                headers=headers,
-                proxies=proxies,
-                timeout=30,
-                verify=True
-            )
+            # Get access token
+            access_token = self._get_access_token(tenant, account_config)
+            if not access_token:
+                self.logger.error("Failed to get access token")
+                return
             
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"HTTP Request Error: {str(e)}")
-
-    def _process_response(self, helper, ew, response, headers):
-        """Process the API response and write events"""
-        if "error" in response:
-            account = helper.get_arg('app_account')
-            helper.log_error(f"Error occurred: {json.dumps(response, indent=4)}")
-            raise ValueError(f"Error from Microsoft Graph API: {response.get('error', {}).get('message', 'Unknown error')}")
-        
-        alerts = []
-        if isinstance(response.get('value'), dict):
-            alerts.append(response['value'])
-        elif isinstance(response.get('value'), list):
-            alerts.extend(response['value'])
-        
-        self._remove_nulls(alerts)
-        self._write_events(helper, ew, alerts)
-        
-        # Handle pagination
-        next_link = response.get("@odata.nextLink")
-        while next_link and self._is_https(next_link):
-            helper.log_debug(f"Getting next page: {next_link}")
+            # Build headers
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "User-Agent": f"MicrosoftGraphSecurity-Splunk/{self._get_app_version()}",
+                "Accept": "application/json"
+            }
             
-            response = self._send_http_request(next_link, "GET", headers=headers)
+            # Get proxy settings
+            proxies = self._get_proxy_settings()
             
-            alerts = []
-            if isinstance(response.get('value'), dict):
-                alerts.append(response['value'])
-            elif isinstance(response.get('value'), list):
-                alerts.extend(response['value'])
+            # Build URL and params
+            url = GRAPH_ALERTS_URL
+            params = {'$filter': filter_val} if filter_val else {}
             
-            self._remove_nulls(alerts)
-            self._write_events(helper, ew, alerts)
+            # Request data
+            processed_events = 0
+            has_more = True
             
-            next_link = response.get("@odata.nextLink")
-
-    def _write_events(self, helper, ew, alerts=None):
-        """Write events to Splunk"""
-        if not alerts:
-            return
+            while has_more:
+                self.logger.debug(f"Making request to {url} with params {params}")
+                import requests
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    proxies=proxies,
+                    timeout=REQTIMEOUT
+                )
+                
+                if response.status_code != 200:
+                    self.logger.error(f"API request failed with status {response.status_code}: {response.text}")
+                    if response.status_code in (401, 403):
+                        # Token might be expired, try to refresh and retry once
+                        self.logger.info("Authentication error, attempting to refresh token and retry")
+                        access_token = self._get_access_token(tenant, account_config)
+                        headers["Authorization"] = f"Bearer {access_token}"
+                        
+                        # Retry the request
+                        response = requests.get(
+                            url,
+                            headers=headers,
+                            params=params,
+                            proxies=proxies,
+                            timeout=REQTIMEOUT
+                        )
+                        
+                        if response.status_code != 200:
+                            self.logger.error(f"Retry failed with status {response.status_code}: {response.text}")
+                            break
+                    else:
+                        break
+                
+                data = response.json()
+                alerts = data.get('value', [])
+                
+                # Process alerts
+                if not alerts:
+                    self.logger.info("No alerts found")
+                else:
+                    for alert in alerts:
+                        # Remove empty/null values
+                        self._remove_nulls(alert)
+                        
+                        # Create and write event
+                        event = smi.Event(
+                            data=json.dumps(alert),
+                            source=self._input_name,
+                            index=self._index,
+                            sourcetype=self._sourcetype,
+                            host=self._eventhost
+                        )
+                        ew.write_event(event)
+                        processed_events += 1
+                
+                # Check for more pages
+                if '@odata.nextLink' in data:
+                    url = data['@odata.nextLink']
+                    params = None  # params are included in the nextLink URL
+                else:
+                    has_more = False
             
-        for alert in alerts:
-            event = smi.Event(
-                data=json.dumps(alert),
-                source=helper.get_arg('name'),
-                index=helper.get_arg('index', 'default'),
-                sourcetype='GraphSecurityAlert:V2',
-            )
-            ew.write_event(event)
-
-    def _is_https(self, url):
-        """Check if URL is https"""
-        return url.startswith("https://")
+            self.logger.info(f"Processed {processed_events} alerts")
+            
+        except Exception as e:
+            self.logger.error(f"Error collecting events: {str(e)}")
+            self.logger.error(traceback.format_exc())
 
     def _remove_nulls(self, d):
         """Function to remove all null or empty values from the JSON response."""
@@ -285,75 +495,71 @@ class MICROSOFT_GRAPH_SECURITY(smi.Script):
                 self._remove_nulls(v)
         return d
 
+    def _get_checkpoint(self, key):
+        """Get checkpoint from KV Store"""
+        try:
+            service = client.connect(
+                token=self._session_key,
+                app=APP_NAME
+            )
+            
+            # Check if collection exists
+            collection_name = f"{APP_NAME}_checkpoints"
+            if collection_name not in service.kvstore:
+                self.logger.info(f"Creating checkpoint collection: {collection_name}")
+                service.kvstore.create(collection_name)
+            
+            # Get KV Store collection
+            collection = service.kvstore[collection_name]
+            
+            # Try to get checkpoint
+            try:
+                response = collection.data.query(query=json.dumps({"_key": key}))
+                if response and len(response) > 0:
+                    return response[0].get("value")
+            except Exception as e:
+                self.logger.debug(f"Checkpoint not found: {str(e)}")
+            
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting checkpoint: {str(e)}")
+            return None
 
-class InputHelper:
-    """Helper class to provide compatibility with the UCC input helper interface"""
-    
-    def __init__(self, input_item, input_name, session_key, app_name):
-        self.input_item = input_item
-        self.input_name = input_name
-        self.session_key = session_key
-        self.app_name = app_name
-        
-        # Set up checkpoint directory
-        self.checkpoint_dir = self._get_checkpoint_dir()
-        
-    def get_arg(self, arg_name, default=None):
-        """Get argument value from input"""
-        return self.input_item.get(arg_name, default)
-    
-    def get_output_index(self):
-        """Get output index"""
-        return self.get_arg('index', 'default')
-    
-    def get_input_type(self):
-        """Get input type"""
-        return 'microsoft_graph_security'
-    
-    def get_sourcetype(self):
-        """Get sourcetype"""
-        return 'GraphSecurityAlert:v2'
-    
-    def log_debug(self, message):
-        """Log debug message"""
-        print(f"DEBUG: {message}", file=sys.stderr)
-    
-    def log_info(self, message):
-        """Log info message"""
-        print(f"INFO: {message}", file=sys.stderr)
-    
-    def log_warning(self, message):
-        """Log warning message"""
-        print(f"WARNING: {message}", file=sys.stderr)
-    
-    def log_error(self, message):
-        """Log error message"""
-        print(f"ERROR: {message}", file=sys.stderr)
-    
-    def _get_checkpoint_dir(self):
-        """Get checkpoint directory"""
-        import os
-        checkpoint_dir = os.path.join(os.environ.get('SPLUNK_HOME', ''), 'var', 'lib', 'splunk', 'modinputs', 'ta_microsoft_xdr_alerts')
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        return checkpoint_dir
-    
-    def get_check_point(self, key):
-        """Get checkpoint value"""
-        checkpoint_file = os.path.join(self.checkpoint_dir, key)
-        
-        if os.path.exists(checkpoint_file):
-            with open(checkpoint_file, 'r') as f:
-                return f.read().strip()
-        return None
-    
-    def save_check_point(self, key, value):
-        """Save checkpoint value"""
-        checkpoint_file = os.path.join(self.checkpoint_dir, key)
-        
-        with open(checkpoint_file, 'w') as f:
-            f.write(str(value))
+    def _set_checkpoint(self, key, value):
+        """Set checkpoint in KV Store"""
+        try:
+            service = client.connect(
+                token=self._session_key,
+                app=APP_NAME
+            )
+            
+            # Check if collection exists
+            collection_name = f"{APP_NAME}_checkpoints"
+            if collection_name not in service.kvstore:
+                self.logger.info(f"Creating checkpoint collection: {collection_name}")
+                service.kvstore.create(collection_name)
+            
+            # Get KV Store collection
+            collection = service.kvstore[collection_name]
+            
+            # Update or insert checkpoint
+            checkpoint_data = {"_key": key, "value": value}
+            try:
+                # Try to update existing record
+                collection.data.query_by_id(key)
+                collection.data.update(key, json.dumps(checkpoint_data))
+                self.logger.debug(f"Updated checkpoint {key} with value {value}")
+            except Exception:
+                # Record doesn't exist, create it
+                collection.data.insert(json.dumps(checkpoint_data))
+                self.logger.debug(f"Created checkpoint {key} with value {value}")
+            
+            return True
+        except Exception as e:
+            self.logger.error(f"Error setting checkpoint: {str(e)}")
+            return False
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     exit_code = MICROSOFT_GRAPH_SECURITY().run(sys.argv)
     sys.exit(exit_code)
